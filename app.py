@@ -4,29 +4,19 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from textblob import TextBlob
 import sqlite3
 import os
-import sys
 import re
 import math
 from datetime import datetime
 from collections import deque
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
+app.config['SECRET_KEY'] = 'your-secret-key-here'
 app.config['SESSION_TYPE'] = 'filesystem'
 
-# ========== DATABASE PATH - FIXED FOR RENDER ==========
-# Render's free tier uses read-only filesystem, so use /tmp for database
-if 'RENDER' in os.environ:
-    DATABASE = '/tmp/helpdesk.db'
-else:
-    DATABASE = 'instance/helpdesk.db'
+# ========== FIXED DATABASE PATH FOR RENDER ==========
+# Render only allows writing to /tmp directory
+DATABASE = '/tmp/helpdesk.db'
 
-# Ensure database directory exists
-db_dir = os.path.dirname(DATABASE)
-if db_dir and not os.path.exists(db_dir):
-    os.makedirs(db_dir, exist_ok=True)
-
-# ========== DATABASE FUNCTIONS ==========
 def get_db():
     conn = sqlite3.connect(DATABASE)
     conn.row_factory = sqlite3.Row
@@ -78,7 +68,6 @@ def init_db():
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )''')
     
-    # Create admin user
     admin = c.execute("SELECT * FROM users WHERE username = 'admin'").fetchone()
     if not admin:
         c.execute("INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)",
@@ -87,7 +76,7 @@ def init_db():
     
     conn.commit()
     conn.close()
-    print("Database ready")
+    print("Database ready at:", DATABASE)
 
 # ========== PURE ML MODEL ==========
 class PureMLModel:
