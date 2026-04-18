@@ -1,65 +1,23 @@
-import os
-import re
-import math
-from datetime import datetime
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, session
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user, UserMixin
 from werkzeug.security import generate_password_hash, check_password_hash
 from textblob import TextBlob
-import firebase_admin
-from firebase_admin import credentials, firestore, auth
-from dotenv import load_dotenv
-
-load_dotenv()
+import sqlite3
+import os
+import re
+import math
+from datetime import datetime
+from collections import deque
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-here')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
+app.config['SESSION_TYPE'] = 'filesystem'
 
-# ========== FIREBASE INITIALIZATION ==========
-# Check if running on cloud or local
-if os.path.exists('firebase-key.json'):
-    cred = credentials.Certificate('firebase-key.json')
-else:
-    # For cloud deployment - use environment variable
-    cred = credentials.Certificate({
-        "type": os.getenv("FIREBASE_TYPE"),
-        "project_id": os.getenv("FIREBASE_PROJECT_ID"),
-        "private_key_id": os.getenv("FIREBASE_PRIVATE_KEY_ID"),
-        "private_key": os.getenv("FIREBASE_PRIVATE_KEY").replace('\\n', '\n'),
-        "client_email": os.getenv("FIREBASE_CLIENT_EMAIL"),
-        "client_id": os.getenv("FIREBASE_CLIENT_ID"),
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token",
-    })
+# Get port from environment variable (Render sets this)
+PORT = int(os.environ.get('PORT', 5000))
 
-firebase_admin.initialize_app(cred)
-db = firestore.client()
-
-# ========== HELPER FUNCTIONS ==========
-def get_user_by_username(username):
-    users_ref = db.collection('users')
-    query = users_ref.where('username', '==', username).limit(1).get()
-    for doc in query:
-        return {**doc.to_dict(), 'id': doc.id}
-    return None
-
-def get_user_by_email(email):
-    users_ref = db.collection('users')
-    query = users_ref.where('email', '==', email).limit(1).get()
-    for doc in query:
-        return {**doc.to_dict(), 'id': doc.id}
-    return None
-
-def create_user(username, email, password_hash):
-    doc_ref = db.collection('users').document()
-    doc_ref.set({
-        'username': username,
-        'email': email,
-        'password_hash': password_hash,
-        'role': 'user',
-        'created_at': datetime.now().isoformat()
-    })
-    return doc_ref.id
+DATABASE = 'instance/helpdesk.db'
+os.makedirs('instance', exist_ok=True)
 
 # ========== PURE ML MODEL ==========
 class PureMLModel:
@@ -80,7 +38,6 @@ class PureMLModel:
             ("printer won't print", "printer"),
             ("printer says offline", "printer"),
             ("paper jam", "printer"),
-            ("printer out of ink", "printer"),
             ("forgot my password", "password"),
             ("can't login", "password"),
             ("reset password", "password"),
@@ -94,6 +51,7 @@ class PureMLModel:
             ("email not sending", "email"),
             ("vpn not connecting", "vpn"),
             ("talk to human", "escalation"),
+            ("speak to agent", "escalation"),
         ]
         
         for text, cat in data:
@@ -137,6 +95,68 @@ class PureMLModel:
 
 ml_model = PureMLModel()
 
+# ========== DATABASE FUNCTIONS ==========
+def get_db():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db()
+    c = conn.cursor()
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT DEFAULT 'user'
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS chat_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        title TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS chat_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER,
+        user_id INTEGER,
+        user_message TEXT NOT NULL,
+        bot_response TEXT NOT NULL,
+        category TEXT,
+        confidence REAL,
+        sentiment REAL,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS escalations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        user_message TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id INTEGER,
+        rating INTEGER,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
+    admin = c.execute("SELECT * FROM users WHERE username = 'admin'").fetchone()
+    if not admin:
+        c.execute("INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)",
+                  ('admin', 'admin@helpdesk.com', generate_password_hash('admin123'), 'admin'))
+        print("Admin created: admin / admin123")
+    
+    conn.commit()
+    conn.close()
+    print("Database ready")
+
 # ========== SENTIMENT ANALYSIS ==========
 def analyze_sentiment(text):
     try:
@@ -148,72 +168,15 @@ def analyze_sentiment(text):
 # ========== RESPONSES ==========
 def get_response(category, confidence, sentiment):
     responses = {
-        'printer': f"""🔧 **Printer Troubleshooting** ({confidence:.0f}% sure)
-
-1. Check power and paper
-2. Restart printer and computer
-3. Clear print queue
-
-Type 'human' for IT support""",
-
-        'password': f"""🔐 **Password Reset** ({confidence:.0f}% sure)
-
-1. Click "Forgot Password"
-2. Check email (Spam folder too)
-3. Create strong password
-
-Type 'human' if locked out""",
-
-        'network': f"""🌐 **WiFi Fix** ({confidence:.0f}% sure)
-
-1. Restart router (unplug 30 sec)
-2. Run: ipconfig /release && ipconfig /renew
-3. Restart computer
-
-Type 'human' for help""",
-
-        'performance': f"""⚡ **Slow Computer** ({confidence:.0f}% sure)
-
-1. Restart computer
-2. Close unused programs
-3. Run Disk Cleanup
-
-Type 'human' for help""",
-
-        'software': f"""💻 **App Fix** ({confidence:.0f}% sure)
-
-1. Restart the app
-2. Restart computer
-3. Run: sfc /scannow
-
-Type 'human' for help""",
-
-        'email': f"""📧 **Email Fix** ({confidence:.0f}% sure)
-
-1. Close and reopen Outlook
-2. Run: outlook.exe /safe
-3. Create new profile
-
-Type 'human' for support""",
-
-        'vpn': f"""🔒 **VPN Fix** ({confidence:.0f}% sure)
-
-1. Check internet
-2. Restart VPN app
-3. Try different server
-
-Type 'human' for support""",
-
-        'escalation': f"""👤 **Human Support Requested**
-
-Agent notified. Will contact within 15 minutes.
-Ticket: {datetime.now().strftime('%H%M%S')}""",
-
-        'unknown': f"""🤔 Need more details ({confidence:.0f}%)
-
-What happened? Any error message?
-
-Try: printer, password, or wifi"""
+        'printer': f"🔧 Printer Fix ({confidence:.0f}%)\n\n1. Check power and paper\n2. Restart printer and computer\n3. Clear print queue\n\nType 'human' for IT support",
+        'password': f"🔐 Password Reset ({confidence:.0f}%)\n\n1. Click Forgot Password\n2. Check email (Spam folder too)\n3. Create strong password\n\nType 'human' if locked out",
+        'network': f"🌐 WiFi Fix ({confidence:.0f}%)\n\n1. Restart router (unplug 30 sec)\n2. Restart computer\n3. Forget and reconnect to WiFi\n\nType 'human' for help",
+        'performance': f"⚡ Slow Computer ({confidence:.0f}%)\n\n1. Restart computer\n2. Close unused programs\n3. Run Disk Cleanup\n\nType 'human' for help",
+        'software': f"💻 App Fix ({confidence:.0f}%)\n\n1. Restart the app\n2. Restart computer\n3. Reinstall if needed\n\nType 'human' for help",
+        'email': f"📧 Email Fix ({confidence:.0f}%)\n\n1. Close and reopen Outlook\n2. Check internet connection\n3. Try web version\n\nType 'human' for support",
+        'vpn': f"🔒 VPN Fix ({confidence:.0f}%)\n\n1. Check internet\n2. Restart VPN app\n3. Try different server\n\nType 'human' for support",
+        'escalation': f"👤 Human Support Requested\n\nAgent notified. Will contact within 15 minutes.\nTicket: {datetime.now().strftime('%H%M%S')}",
+        'unknown': f"🤔 Need more details ({confidence:.0f}%)\n\nWhat happened? Any error message?\n\nTry: printer, password, or wifi"
     }
     return responses.get(category, responses['unknown'])
 
@@ -231,11 +194,11 @@ class User(UserMixin):
 
 @login_manager.user_loader
 def load_user(user_id):
-    doc_ref = db.collection('users').document(user_id)
-    doc = doc_ref.get()
-    if doc.exists:
-        data = doc.to_dict()
-        return User(doc.id, data['username'], data['email'], data['role'])
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+    if user:
+        return User(user['id'], user['username'], user['email'], user['role'])
     return None
 
 # ========== ROUTES ==========
@@ -253,7 +216,9 @@ def login():
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
-        user = get_user_by_username(username)
+        conn = get_db()
+        user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        conn.close()
         if user and check_password_hash(user['password_hash'], password):
             login_user(User(user['id'], user['username'], user['email'], user['role']))
             flash('Login successful!')
@@ -268,11 +233,16 @@ def register():
         username = request.form.get('username')
         email = request.form.get('email')
         password = request.form.get('password')
-        existing = get_user_by_username(username)
+        conn = get_db()
+        existing = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
         if existing:
+            conn.close()
             flash('Username exists')
             return redirect(url_for('register'))
-        create_user(username, email, generate_password_hash(password))
+        conn.execute("INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)", 
+                     (username, email, generate_password_hash(password)))
+        conn.commit()
+        conn.close()
         flash('Registration successful!')
         return redirect(url_for('login'))
     return render_template('register.html')
@@ -295,21 +265,21 @@ def chat_api():
             return jsonify({'error': 'Empty'}), 400
         
         if not session_id:
-            session_ref = db.collection('chat_sessions').document()
-            session_ref.set({
-                'user_id': current_user.id,
-                'title': 'New Chat',
-                'created_at': datetime.now().isoformat(),
-                'updated_at': datetime.now().isoformat()
-            })
-            session_id = session_ref.id
+            conn = get_db()
+            cursor = conn.execute(
+                "INSERT INTO chat_sessions (user_id, title) VALUES (?, ?)",
+                (current_user.id, 'New Chat')
+            )
+            session_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
         
         if msg.lower() in ['human', 'help', 'support', 'agent']:
-            db.collection('escalations').add({
-                'user_id': current_user.id,
-                'user_message': msg,
-                'timestamp': datetime.now().isoformat()
-            })
+            conn = get_db()
+            conn.execute("INSERT INTO escalations (user_id, user_message) VALUES (?, ?)", 
+                        (current_user.id, msg))
+            conn.commit()
+            conn.close()
             response = get_response('escalation', 1.0, 0)
             return jsonify({'response': response, 'category': 'escalation', 'confidence': 1.0, 'session_id': session_id})
         
@@ -317,34 +287,28 @@ def chat_api():
         category, confidence = ml_model.predict(msg)
         response = get_response(category, confidence, sentiment)
         
-        # Update session title if new
-        session_doc = db.collection('chat_sessions').document(session_id).get()
-        if session_doc.exists and session_doc.to_dict().get('title') == 'New Chat':
+        conn = get_db()
+        session = conn.execute("SELECT title FROM chat_sessions WHERE id = ?", (session_id,)).fetchone()
+        if session and session['title'] == 'New Chat':
             new_title = msg[:40] + ('...' if len(msg) > 40 else '')
-            db.collection('chat_sessions').document(session_id).update({
-                'title': new_title,
-                'updated_at': datetime.now().isoformat()
-            })
+            conn.execute("UPDATE chat_sessions SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", 
+                        (new_title, session_id))
         
-        # Save message
-        msg_ref = db.collection('chat_messages').document()
-        msg_ref.set({
-            'session_id': session_id,
-            'user_id': current_user.id,
-            'user_message': msg,
-            'bot_response': response,
-            'category': category,
-            'confidence': confidence,
-            'sentiment': sentiment,
-            'timestamp': datetime.now().isoformat()
-        })
+        cursor = conn.execute(
+            "INSERT INTO chat_messages (session_id, user_id, user_message, bot_response, category, confidence, sentiment) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, current_user.id, msg, response, category, confidence, sentiment)
+        )
+        message_id = cursor.lastrowid
+        conn.execute("UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
+        conn.commit()
+        conn.close()
         
         return jsonify({
             'response': response,
             'category': category,
             'confidence': confidence,
             'session_id': session_id,
-            'message_id': msg_ref.id
+            'message_id': message_id
         })
     except Exception as e:
         print(f"Error: {e}")
@@ -353,58 +317,74 @@ def chat_api():
 @app.route('/api/sessions')
 @login_required
 def get_sessions():
-    sessions_ref = db.collection('chat_sessions').where('user_id', '==', current_user.id).order_by('updated_at', direction=firestore.Query.DESCENDING)
-    sessions = []
-    for doc in sessions_ref.stream():
-        data = doc.to_dict()
-        sessions.append({
-            'id': doc.id,
-            'title': data.get('title', 'Chat'),
-            'created_at': data.get('created_at'),
-            'updated_at': data.get('updated_at')
-        })
-    return jsonify(sessions)
+    conn = get_db()
+    sessions = conn.execute(
+        "SELECT id, title, created_at, updated_at FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC",
+        (current_user.id,)
+    ).fetchall()
+    conn.close()
+    return jsonify([{
+        'id': s['id'],
+        'title': s['title'],
+        'created_at': s['created_at'],
+        'updated_at': s['updated_at']
+    } for s in sessions])
 
 @app.route('/api/sessions', methods=['POST'])
 @login_required
 def create_session():
     data = request.get_json()
     title = data.get('title', 'New Chat')
-    session_ref = db.collection('chat_sessions').document()
-    session_ref.set({
-        'user_id': current_user.id,
-        'title': title,
-        'created_at': datetime.now().isoformat(),
-        'updated_at': datetime.now().isoformat()
-    })
-    return jsonify({'id': session_ref.id, 'title': title})
+    conn = get_db()
+    cursor = conn.execute(
+        "INSERT INTO chat_sessions (user_id, title) VALUES (?, ?)",
+        (current_user.id, title)
+    )
+    session_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return jsonify({'id': session_id, 'title': title})
 
-@app.route('/api/sessions/<session_id>', methods=['DELETE'])
+@app.route('/api/sessions/<int:session_id>', methods=['DELETE'])
 @login_required
 def delete_session(session_id):
-    # Delete messages first
-    messages = db.collection('chat_messages').where('session_id', '==', session_id).stream()
-    for msg in messages:
-        db.collection('chat_messages').document(msg.id).delete()
-    # Delete session
-    db.collection('chat_sessions').document(session_id).delete()
+    conn = get_db()
+    conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
+    conn.execute("DELETE FROM chat_sessions WHERE id = ? AND user_id = ?", (session_id, current_user.id))
+    conn.commit()
+    conn.close()
     return jsonify({'success': True})
 
-@app.route('/api/sessions/<session_id>/messages')
+@app.route('/api/sessions/<int:session_id>/messages')
 @login_required
 def get_session_messages(session_id):
-    messages_ref = db.collection('chat_messages').where('session_id', '==', session_id).order_by('timestamp')
-    messages = []
-    for doc in messages_ref.stream():
-        data = doc.to_dict()
-        messages.append({
-            'id': doc.id,
-            'message': data.get('user_message'),
-            'response': data.get('bot_response'),
-            'category': data.get('category'),
-            'confidence': data.get('confidence')
-        })
-    return jsonify(messages)
+    conn = get_db()
+    messages = conn.execute(
+        "SELECT id, user_message, bot_response, category, confidence FROM chat_messages WHERE session_id = ? ORDER BY timestamp ASC",
+        (session_id,)
+    ).fetchall()
+    conn.close()
+    return jsonify([{
+        'id': m['id'],
+        'message': m['user_message'],
+        'response': m['bot_response'],
+        'category': m['category'],
+        'confidence': m['confidence']
+    } for m in messages])
+
+@app.route('/api/history')
+@login_required
+def get_history():
+    conn = get_db()
+    logs = conn.execute(
+        "SELECT user_message, bot_response FROM chat_messages WHERE user_id = ? ORDER BY timestamp DESC LIMIT 50",
+        (current_user.id,)
+    ).fetchall()
+    conn.close()
+    history = []
+    for log in reversed(logs):
+        history.append({'message': log['user_message'], 'response': log['bot_response']})
+    return jsonify(history)
 
 @app.route('/api/feedback', methods=['POST'])
 @login_required
@@ -413,11 +393,10 @@ def submit_feedback():
     message_id = data.get('message_id')
     rating = data.get('rating')
     if message_id and rating is not None:
-        db.collection('feedback').add({
-            'message_id': message_id,
-            'rating': rating,
-            'timestamp': datetime.now().isoformat()
-        })
+        conn = get_db()
+        conn.execute("INSERT INTO feedback (message_id, rating) VALUES (?, ?)", (message_id, rating))
+        conn.commit()
+        conn.close()
         return jsonify({'success': True})
     return jsonify({'success': False}), 400
 
@@ -427,23 +406,15 @@ def admin():
     if current_user.role != 'admin':
         flash('Access denied')
         return redirect(url_for('chat'))
-    
-    # Get stats from Firebase
-    chats = db.collection('chat_messages').stream()
-    users = db.collection('users').stream()
-    escalations = db.collection('escalations').stream()
-    
-    total_chats = sum(1 for _ in chats)
-    total_users = sum(1 for _ in users)
-    total_escalations = sum(1 for _ in escalations)
-    
-    return render_template('admin.html', 
-                         total_chats=total_chats, 
-                         total_users=total_users, 
-                         total_escalations=total_escalations)
+    conn = get_db()
+    total_chats = conn.execute("SELECT COUNT(*) FROM chat_messages").fetchone()[0]
+    total_users = conn.execute("SELECT COUNT(*) FROM users WHERE role = 'user'").fetchone()[0]
+    total_escalations = conn.execute("SELECT COUNT(*) FROM escalations").fetchone()[0]
+    conn.close()
+    return render_template('admin.html', total_chats=total_chats, total_users=total_users, total_escalations=total_escalations)
 
 if __name__ == '__main__':
+    init_db()
     ml_model.train()
-    print("🚀 Server starting at http://localhost:5000")
-    print("🔐 Login: admin / admin123")
-    app.run(debug=True, port=5000)
+    print("Server starting...")
+    app.run(host='0.0.0.0', port=PORT, debug=False)
