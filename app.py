@@ -4,6 +4,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from textblob import TextBlob
 import sqlite3
 import os
+import sys
 import re
 import math
 from datetime import datetime
@@ -13,11 +14,80 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 app.config['SESSION_TYPE'] = 'filesystem'
 
-# Get port from environment variable (Render sets this)
-PORT = int(os.environ.get('PORT', 5000))
+# ========== DATABASE PATH - FIXED FOR RENDER ==========
+# Render's free tier uses read-only filesystem, so use /tmp for database
+if 'RENDER' in os.environ:
+    DATABASE = '/tmp/helpdesk.db'
+else:
+    DATABASE = 'instance/helpdesk.db'
 
-DATABASE = 'instance/helpdesk.db'
-os.makedirs('instance', exist_ok=True)
+# Ensure database directory exists
+db_dir = os.path.dirname(DATABASE)
+if db_dir and not os.path.exists(db_dir):
+    os.makedirs(db_dir, exist_ok=True)
+
+# ========== DATABASE FUNCTIONS ==========
+def get_db():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db()
+    c = conn.cursor()
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT DEFAULT 'user'
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS chat_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        title TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS chat_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER,
+        user_id INTEGER,
+        user_message TEXT NOT NULL,
+        bot_response TEXT NOT NULL,
+        category TEXT,
+        confidence REAL,
+        sentiment REAL,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS escalations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        user_message TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id INTEGER,
+        rating INTEGER,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
+    # Create admin user
+    admin = c.execute("SELECT * FROM users WHERE username = 'admin'").fetchone()
+    if not admin:
+        c.execute("INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)",
+                  ('admin', 'admin@helpdesk.com', generate_password_hash('admin123'), 'admin'))
+        print("Admin created: admin / admin123")
+    
+    conn.commit()
+    conn.close()
+    print("Database ready")
 
 # ========== PURE ML MODEL ==========
 class PureMLModel:
@@ -94,68 +164,6 @@ class PureMLModel:
         return best, confidence
 
 ml_model = PureMLModel()
-
-# ========== DATABASE FUNCTIONS ==========
-def get_db():
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def init_db():
-    conn = get_db()
-    c = conn.cursor()
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        email TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        role TEXT DEFAULT 'user'
-    )''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS chat_sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        title TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS chat_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id INTEGER,
-        user_id INTEGER,
-        user_message TEXT NOT NULL,
-        bot_response TEXT NOT NULL,
-        category TEXT,
-        confidence REAL,
-        sentiment REAL,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS escalations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        user_message TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS feedback (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        message_id INTEGER,
-        rating INTEGER,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )''')
-    
-    admin = c.execute("SELECT * FROM users WHERE username = 'admin'").fetchone()
-    if not admin:
-        c.execute("INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)",
-                  ('admin', 'admin@helpdesk.com', generate_password_hash('admin123'), 'admin'))
-        print("Admin created: admin / admin123")
-    
-    conn.commit()
-    conn.close()
-    print("Database ready")
 
 # ========== SENTIMENT ANALYSIS ==========
 def analyze_sentiment(text):
@@ -417,4 +425,5 @@ if __name__ == '__main__':
     init_db()
     ml_model.train()
     print("Server starting...")
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
