@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - SECRET_KEY=${SECRET_KEY}
+      - FIREBASE_TYPE=${FIREBASE_TYPE}
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
+      - FIREBASE_PRIVATE_KEY_ID=${FIREBASE_PRIVATE_KEY_ID}
+      - FIREBASE_PRIVATE_KEY=${FIREBASE_PRIVATE_KEY}
+      - FIREBASE_CLIENT_EMAIL=${FIREBASE_CLIENT_EMAIL}
+      - FIREBASE_CLIENT_ID=${FIREBASE_CLIENT_ID}
+    restart: unless-stopped

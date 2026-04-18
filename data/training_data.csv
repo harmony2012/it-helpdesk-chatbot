@@ -1,0 +1,39 @@
+﻿question,category
+my printer is not working,printer
+printer won't print,printer
+printer offline,printer
+paper jam,printer
+printer out of ink,printer
+can't print,printer
+forgot my password,password
+can't login,password
+reset password,password
+account locked,password
+login failed,password
+password not working,password
+wifi not connecting,network
+no internet connection,network
+wifi keeps disconnecting,network
+can't connect to wifi,network
+ethernet not working,network
+computer is slow,performance
+slow performance,performance
+computer freezing,performance
+high cpu usage,performance
+outlook not opening,software
+excel crashing,software
+word not saving,software
+software installation failed,software
+application not responding,software
+email not sending,email
+outlook not syncing,email
+can't receive emails,email
+email stuck in outbox,email
+vpn not connecting,vpn
+vpn connection failed,vpn
+can't access vpn,vpn
+vpn keeps disconnecting,vpn
+talk to human,escalation
+speak to agent,escalation
+need help from person,escalation
+connect me to support,escalation

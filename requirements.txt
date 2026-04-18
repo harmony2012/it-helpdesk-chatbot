@@ -1,0 +1,7 @@
+flask==3.0.3
+flask-login==0.6.3
+werkzeug==3.0.3
+textblob==0.18.0
+firebase-admin==6.4.0
+python-dotenv==1.0.1
+gunicorn==21.2.0

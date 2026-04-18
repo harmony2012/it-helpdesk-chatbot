@@ -1,0 +1,15 @@
+{
+  "accuracy": 0.6666666666666666,
+  "categories": [
+    "printer",
+    "password",
+    "network",
+    "performance",
+    "software",
+    "email",
+    "hardware",
+    "vpn",
+    "escalation"
+  ],
+  "samples": 72
+}

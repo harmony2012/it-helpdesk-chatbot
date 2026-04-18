@@ -1,0 +1,377 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-md-3 col-lg-2 sidebar" style="height: calc(100vh - 130px); overflow-y: auto;">
+            <div class="p-3">
+                <button id="newChatBtn" class="btn btn-primary w-100 mb-3">
+                    <i class="fas fa-plus"></i> New Chat
+                </button>
+                <div class="mb-3">
+                    <input type="text" id="searchChats" class="form-control" placeholder="Search chats...">
+                </div>
+                <h6>Chat History <span id="chatCount" class="badge bg-secondary"></span></h6>
+                <div id="sessionList" class="list-group list-group-flush">
+                    <div class="text-muted text-center">Loading...</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-md-9 col-lg-10">
+            <div class="card">
+                <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">
+                        <i class="fas fa-robot"></i> AI-Powered IT Helpdesk
+                    </h5>
+                    <span id="chatTitle" class="small">Current Chat</span>
+                </div>
+                <div id="chat" class="card-body" style="height: 450px; overflow-y: auto; background-color: #f8f9fa;">
+                    <div class="text-center text-muted">
+                        <i class="fas fa-brain fa-2x"></i>
+                        <p>How can I help you with your IT issue today?</p>
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <div class="input-group">
+                        <input type="text" id="messageInput" class="form-control" placeholder="Type your IT question here...">
+                        <button id="voiceBtn" class="btn btn-outline-secondary" type="button">
+                            <i class="fas fa-microphone"></i>
+                        </button>
+                        <button id="sendBtn" class="btn btn-primary" type="button">
+                            <i class="fas fa-paper-plane"></i> Send
+                        </button>
+                    </div>
+                    <div class="mt-2 d-flex justify-content-between">
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-secondary quick-btn" data-question="printer not working">🔧 Printer</button>
+                            <button class="btn btn-outline-secondary quick-btn" data-question="forgot password">🔐 Password</button>
+                            <button class="btn btn-outline-secondary quick-btn" data-question="wifi not connecting">🌐 WiFi</button>
+                            <button class="btn btn-outline-secondary quick-btn" data-question="computer is slow">⚡ Speed</button>
+                            <button class="btn btn-outline-secondary quick-btn" data-question="human">👤 Human</button>
+                        </div>
+                        <small class="text-muted">
+                            🤖 Confidence: <span id="confidenceBadge">Ready</span>
+                        </small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script>
+let currentSessionId = null;
+let recognition = null;
+
+if ('webkitSpeechRecognition' in window) {
+    recognition = new webkitSpeechRecognition();
+    recognition.lang = 'en-US';
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    
+    recognition.onstart = function() {
+        $('#voiceBtn').html('<i class="fas fa-microphone-slash"></i>').removeClass('btn-outline-secondary').addClass('btn-danger');
+        $('#messageInput').attr('placeholder', 'Listening...');
+    };
+    
+    recognition.onend = function() {
+        $('#voiceBtn').html('<i class="fas fa-microphone"></i>').removeClass('btn-danger').addClass('btn-outline-secondary');
+        $('#messageInput').attr('placeholder', 'Type your IT question here...');
+    };
+    
+    recognition.onresult = function(event) {
+        const transcript = event.results[0][0].transcript;
+        $('#messageInput').val(transcript);
+        sendMessage();
+    };
+    
+    recognition.onerror = function(event) {
+        $('#voiceBtn').html('<i class="fas fa-microphone"></i>').removeClass('btn-danger').addClass('btn-outline-secondary');
+        $('#messageInput').attr('placeholder', 'Type your IT question here...');
+    };
+}
+
+$('#voiceBtn').click(function() {
+    if (recognition) {
+        try {
+            recognition.start();
+        } catch(e) {}
+    } else {
+        alert('Voice recognition not supported. Please use Chrome.');
+    }
+});
+
+$('#searchChats').on('input', function() {
+    const term = $(this).val().toLowerCase();
+    $('#sessionList .list-group-item').each(function() {
+        const title = $(this).find('strong').text().toLowerCase();
+        if (title.includes(term)) $(this).show();
+        else $(this).hide();
+    });
+});
+
+$('.quick-btn').click(function() {
+    const question = $(this).data('question');
+    $('#messageInput').val(question);
+    sendMessage();
+});
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function addMessage(text, isUser, confidence = null, messageId = null) {
+    const div = $('<div>').addClass('mb-3 message');
+    
+    if (isUser) {
+        div.html(`
+            <div class="d-flex justify-content-end">
+                <div class="bg-primary text-white rounded p-2" style="max-width: 80%;">
+                    <strong>You:</strong><br>${escapeHtml(text)}
+                </div>
+            </div>
+        `);
+    } else {
+        let confidenceHtml = '';
+        let feedbackHtml = '';
+        
+        if (confidence !== null) {
+            const percent = Math.round(confidence * 100);
+            const color = confidence > 0.7 ? 'success' : (confidence > 0.4 ? 'warning' : 'danger');
+            confidenceHtml = `<div class="mt-1"><small>🤖 Confidence: <span class="badge bg-${color}">${percent}%</span></small></div>`;
+        }
+        
+        if (messageId) {
+            feedbackHtml = `
+                <div class="mt-1" id="fb-${messageId}">
+                    <small>Was this helpful?</small>
+                    <button class="btn btn-sm btn-outline-success fb-btn" data-id="${messageId}" data-rating="1">👍</button>
+                    <button class="btn btn-sm btn-outline-danger fb-btn" data-id="${messageId}" data-rating="0">👎</button>
+                </div>
+            `;
+        }
+        
+        div.html(`
+            <div class="d-flex justify-content-start">
+                <div class="bg-light rounded p-2" style="max-width: 80%;">
+                    <strong><i class="fas fa-robot text-primary"></i> AI Assistant:</strong><br>
+                    ${escapeHtml(text).replace(/\n/g, '<br>')}
+                    ${confidenceHtml}
+                    ${feedbackHtml}
+                </div>
+            </div>
+        `);
+    }
+    
+    $('#chat').append(div);
+    $('#chat').scrollTop($('#chat')[0].scrollHeight);
+    return div;
+}
+
+async function sendMessage() {
+    const msg = $('#messageInput').val().trim();
+    if (!msg) return;
+    
+    addMessage(msg, true);
+    $('#messageInput').val('');
+    
+    const typingDiv = $('<div>').addClass('mb-3').html(`
+        <div class="d-flex justify-content-start">
+            <div class="bg-light rounded p-2">
+                <em><i class="fas fa-spinner fa-spin"></i> AI is thinking...</em>
+            </div>
+        </div>
+    `);
+    $('#chat').append(typingDiv);
+    $('#chat').scrollTop($('#chat')[0].scrollHeight);
+    $('#confidenceBadge').text('Thinking...');
+    
+    try {
+        const res = await $.ajax({
+            url: '/api/chat',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({message: msg, session_id: currentSessionId})
+        });
+        
+        typingDiv.remove();
+        addMessage(res.response, false, res.confidence, res.message_id);
+        $('#confidenceBadge').text(`${Math.round(res.confidence * 100)}%`);
+        
+        if (res.session_id) {
+            currentSessionId = res.session_id;
+            loadSessions();
+        }
+    } catch (err) {
+        typingDiv.remove();
+        addMessage('Sorry, I encountered an error. Please try again.', false);
+        $('#confidenceBadge').text('Error');
+        console.error('Error:', err);
+    }
+}
+
+function loadSessions() {
+    $.get('/api/sessions', function(sessions) {
+        const container = $('#sessionList');
+        container.empty();
+        
+        if (sessions.length === 0) {
+            container.html('<div class="text-muted text-center">No chats yet. Start a new chat!</div>');
+            $('#chatCount').text('0');
+            return;
+        }
+        
+        $('#chatCount').text(sessions.length);
+        
+        sessions.forEach(s => {
+            const date = new Date(s.updated_at).toLocaleDateString();
+            const time = new Date(s.updated_at).toLocaleTimeString();
+            const active = (currentSessionId === s.id) ? 'active bg-primary text-white' : '';
+            container.append(`
+                <div class="list-group-item list-group-item-action ${active}" data-id="${s.id}" style="cursor:pointer;">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div style="flex: 1; cursor: pointer;">
+                            <strong>${escapeHtml(s.title)}</strong><br>
+                            <small class="${active ? 'text-white-50' : 'text-muted'}">${date} ${time}</small>
+                        </div>
+                        <button class="btn btn-sm btn-outline-danger delete-session" data-id="${s.id}" style="z-index: 10;">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
+                </div>
+            `);
+        });
+        
+        if (!currentSessionId && sessions.length > 0 && window.location.pathname === '/chat') {
+            loadSession(sessions[0].id);
+        }
+    }).fail(function(err) {
+        console.error('Failed to load sessions:', err);
+        $('#sessionList').html('<div class="text-danger text-center">Error loading chats</div>');
+    });
+}
+
+function loadSession(id) {
+    if (!id) return;
+    
+    currentSessionId = id;
+    $('#chat').empty();
+    $('#confidenceBadge').text('Loading...');
+    
+    $.get(`/api/sessions/${id}/messages`, function(messages) {
+        $('#chat').empty();
+        if (messages.length === 0) {
+            $('#chat').html('<div class="text-center text-muted">No messages yet. Start typing!</div>');
+        } else {
+            messages.forEach(m => {
+                addMessage(m.message, true);
+                addMessage(m.response, false, m.confidence, m.id);
+            });
+        }
+        $('#confidenceBadge').text('Ready');
+        $('#chatTitle').text(`${messages.length} messages`);
+        
+        $('.list-group-item').removeClass('active bg-primary text-white');
+        $(`.list-group-item[data-id="${id}"]`).addClass('active bg-primary text-white');
+    }).fail(function(err) {
+        console.error('Failed to load messages:', err);
+        $('#chat').html('<div class="text-danger text-center">Error loading messages</div>');
+        $('#confidenceBadge').text('Error');
+    });
+}
+
+function deleteSession(sessionId) {
+    if (confirm('Delete this chat? This action cannot be undone.')) {
+        $.ajax({
+            url: `/api/sessions/${sessionId}`,
+            method: 'DELETE',
+            success: function() {
+                if (currentSessionId === sessionId) {
+                    currentSessionId = null;
+                    $('#chat').empty();
+                    $('#chat').html('<div class="text-center text-muted">Chat deleted. Start a new conversation!</div>');
+                    $('#chatTitle').text('No chat selected');
+                    $('#confidenceBadge').text('Ready');
+                }
+                loadSessions();
+            },
+            error: function(err) {
+                console.error('Failed to delete session:', err);
+                alert('Failed to delete chat. Please try again.');
+            }
+        });
+    }
+}
+
+function sendFeedback(messageId, rating) {
+    $.ajax({
+        url: '/api/feedback',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ message_id: messageId, rating: rating }),
+        success: function() {
+            $(`#fb-${messageId}`).html('<small class="text-success">Thanks for your feedback! 👍</small>');
+        }
+    });
+}
+
+$(document).ready(function() {
+    $('#newChatBtn').click(function() {
+        $.ajax({
+            url: '/api/sessions',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ title: 'New Chat' }),
+            success: function(data) {
+                currentSessionId = data.id;
+                $('#chat').empty();
+                $('#chat').html('<div class="text-center text-muted">New chat started! Type your question below.</div>');
+                $('#chatTitle').text('New Chat');
+                $('#confidenceBadge').text('Ready');
+                loadSessions();
+            },
+            error: function(err) {
+                console.error('Failed to create new chat:', err);
+                alert('Failed to create new chat. Please try again.');
+            }
+        });
+    });
+    
+    $('#sendBtn').click(sendMessage);
+    
+    $('#messageInput').keypress(function(e) {
+        if (e.which === 13) {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+    
+    $(document).on('click', '.list-group-item', function(e) {
+        if ($(e.target).hasClass('delete-session') || $(e.target).closest('.delete-session').length) {
+            return;
+        }
+        const id = $(this).data('id');
+        if (id) {
+            loadSession(id);
+        }
+    });
+    
+    $(document).on('click', '.delete-session', function(e) {
+        e.stopPropagation();
+        const id = $(this).data('id');
+        deleteSession(id);
+    });
+    
+    $(document).on('click', '.fb-btn', function() {
+        const id = $(this).data('id');
+        const rating = $(this).data('rating');
+        sendFeedback(id, rating);
+    });
+    
+    loadSessions();
+});
+</script>
+{% endblock %}
