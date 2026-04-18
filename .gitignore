@@ -1,8 +1,5 @@
-__pycache__/
-*.pyc
-instance/
-*.db
-.env
-firebase-key.json
-venv/
-.venv/
+echo "__pycache__/" > .gitignore
+echo "*.pyc" >> .gitignore
+echo "instance/*.db" >> .gitignore
+echo ".venv/" >> .gitignore
+echo "venv/" >> .gitignore
