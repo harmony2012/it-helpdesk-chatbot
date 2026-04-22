@@ -10,12 +10,16 @@ from datetime import datetime
 from collections import deque
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-here'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 app.config['SESSION_TYPE'] = 'filesystem'
 
-# ========== FIXED DATABASE PATH FOR RENDER ==========
-# Render only allows writing to /tmp directory
-DATABASE = '/tmp/helpdesk.db'
+# Database path - works on both local and cloud
+if 'RENDER' in os.environ or 'SNAPDEPLOY' in os.environ:
+    DATABASE = '/tmp/helpdesk.db'
+else:
+    DATABASE = 'instance/helpdesk.db'
+
+os.makedirs(os.path.dirname(DATABASE) if os.path.dirname(DATABASE) else '.', exist_ok=True)
 
 def get_db():
     conn = sqlite3.connect(DATABASE)
@@ -76,7 +80,7 @@ def init_db():
     
     conn.commit()
     conn.close()
-    print("Database ready at:", DATABASE)
+    print("Database ready")
 
 # ========== PURE ML MODEL ==========
 class PureMLModel:
@@ -154,7 +158,6 @@ class PureMLModel:
 
 ml_model = PureMLModel()
 
-# ========== SENTIMENT ANALYSIS ==========
 def analyze_sentiment(text):
     try:
         blob = TextBlob(text)
@@ -162,7 +165,6 @@ def analyze_sentiment(text):
     except:
         return 0.0
 
-# ========== RESPONSES ==========
 def get_response(category, confidence, sentiment):
     responses = {
         'printer': f"🔧 Printer Fix ({confidence:.0f}%)\n\n1. Check power and paper\n2. Restart printer and computer\n3. Clear print queue\n\nType 'human' for IT support",
@@ -177,7 +179,6 @@ def get_response(category, confidence, sentiment):
     }
     return responses.get(category, responses['unknown'])
 
-# ========== FLASK-LOGIN ==========
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
@@ -410,9 +411,9 @@ def admin():
     conn.close()
     return render_template('admin.html', total_chats=total_chats, total_users=total_users, total_escalations=total_escalations)
 
+# ========== RUN THE APP ==========
 if __name__ == '__main__':
     init_db()
     ml_model.train()
-    print("Server starting...")
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
